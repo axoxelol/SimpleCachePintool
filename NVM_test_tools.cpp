@@ -14,6 +14,8 @@
 /* ================================================================== */
 typedef unsigned long long address_64; // Represent a 64-bit address.
 
+
+
 #define READ 0
 #define WRITE 1
 
@@ -47,8 +49,10 @@ typedef struct {
     int misses;                 // Number of cache misses.
     int hits;                   // Number of cache hits.
     int no_evicts;              // Number of times cache lines are evicted from the cache due to lack of room in set.
-    int no_write_lookups;       // Number of time a write instruction looks for an tag in the cache.
-    int no_read_lookups;        // Number of time a write instruction looks for an tag in the cache.
+    int no_write_lookups;       // Number of times a write instruction looks for a tag in the cache.
+    int no_read_lookups;        // Number of times a write instruction looks for a tag in the cache.
+    int no_write_straddles;      // Number of times a write instruction straddles cache lines.
+    int no_read_straddles;       // Number of times a read instruction straddles cache lines.
 
 } cache;
 
@@ -281,7 +285,7 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
     } else {
         self->no_read_lookups++;
     }
-    
+
     address_64 tag = get_tag(self, addr);
     int index = get_index(self, tag);
     bool straddle = false;
@@ -293,6 +297,11 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
     if(offset + ins_size >= self->line_size) {
         straddle = true;
         self->no_cache_straddles++;
+        if(ins_type == WRITE) {
+            self->no_write_straddles++;
+        } else {
+            self->no_read_straddles++;
+        }
         next_addr = addr + (self->line_size - offset); // Starting address of instruction on next cache line.
         remaining_size = ins_size - (self->line_size - offset); // Size of read or write to be done on next line
         ins_size = self->line_size - offset; // Size of read or write to be done on this line.
@@ -534,18 +543,21 @@ VOID Fini(INT32 code, VOID *v)
 {
     count_dirty_bits(myCache);
     *out <<  "===============================================" << endl;
-    *out <<  "MyPinTool analysis results: " << endl << endl;
+    *out <<  "PinTool analysis results: " << endl << endl;
 
     *out <<  "Number of instructions: " << insCount  << endl;
     *out <<  "Number of reads: " << readCount  << endl;
     *out <<  "Number of writes: " << writeCount  << endl << endl;
 
-    *out <<  "Number of cache write lookups: " << myCache->no_write_lookups << endl;
     *out <<  "Number of cache read lookups: " << myCache->no_read_lookups << endl;
+    *out <<  "Number of cache write lookups: " << myCache->no_write_lookups << endl;
     *out <<  "Number of cache hits: " << myCache->hits << endl;
     *out <<  "Number of cache misses: " << myCache->misses << endl << endl;
 
     *out <<  "Number of cache line straddles: " << myCache->no_cache_straddles  << endl;
+    *out <<  "Number of read cache line straddles: " << myCache->no_read_straddles  << endl;
+    *out <<  "Number of write cache line straddles: " << myCache->no_write_straddles  << endl << enld;
+
     *out <<  "Number of bytes written to memory: " << myCache->no_bytes_written  << endl;
     *out <<  "Number of writes to memory: " << myCache->no_mem_writes  << endl;
     *out <<  "Number of cache line evictions: " <<  myCache->no_evicts  << endl << endl;
