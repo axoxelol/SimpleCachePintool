@@ -6,38 +6,38 @@ If running an applications which writes its output to the terminal you need to u
 to a file. 
 
 ## Commandline switches:
-**-a**  [default 2] _Set associativity of cache._
+**-a**  [default 2] Set associativity of cache.
 
 **-count**  [default 1]
-	_count instructions, basic blocks and threads in the application_
+	count instructions, basic blocks and threads in the application
 	
 	
 **-h**  [default 0]
-	_Print help message (Return failure of PIN_Init() in order to allow the
-	tool                             to print help message)_
+	Print help message (Return failure of PIN_Init() in order to allow the
+	tool                             to print help message)
 	
 	
 **-help**  [default 0]
-	_Print help message (Return failure of PIN_Init() in order to allow the
-	tool                             to print help message)_
+	Print help message (Return failure of PIN_Init() in order to allow the
+	tool                             to print help message)
 	
 	
 **-l**  [default 64]
-	_Set cache line size in bytes._
+	Set cache line size in bytes.
 	
 	
 **-logfile**  [default pintool.log]
-	_The log file path and file name_
+	The log file path and file name
 	
 	
 **-o**  [default ]
-	_specify file name for PinTool output_
+	specify file name for PinTool output
 	
 	
 **-s**  [default 8388608]
-	_Set cache size in bytes._
+	Set cache size in bytes.
 	
 	
 **-unique_logfile**  [default 0]
-	_The log file names will contain the pid_
+	The log file names will contain the pid
 
