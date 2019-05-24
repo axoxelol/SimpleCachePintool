@@ -47,6 +47,8 @@ typedef struct {
     int misses;                 // Number of cache misses.
     int hits;                   // Number of cache hits.
     int no_evicts;              // Number of times cache lines are evicted from the cache due to lack of room in set.
+    int no_write_lookups;       // Number of time a write instruction looks for an tag in the cache.
+    int no_read_lookups;        // Number of time a write instruction looks for an tag in the cache.
 
 } cache;
 
@@ -198,7 +200,7 @@ int check_dirty(int* dirty_arr, int line_size) {
  */
 void add_to_cache(cache* self, address_64 tag, address_64 index) {
     cache_line* line = self->sets[index];
-
+    // If direct mapped cache, evict data if valid and write to that cache line.
     if(self->assoc == 1) {
         if(line->valid == true) {
             int bytes_to_write = check_dirty(line->dirty, self->line_size);
@@ -273,6 +275,13 @@ void write_to_line(cache* self, address_64 addr, cache_line* line, int write_siz
  * @param ins_size Size of the read or write in bytes.
  */
 void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
+    // Update internal statistics.
+    if(ins_type == WRITE) {
+        self->no_write_lookups++;
+    } else {
+        self->no_read_lookups++;
+    }
+    
     address_64 tag = get_tag(self, addr);
     int index = get_index(self, tag);
     bool straddle = false;
@@ -531,6 +540,8 @@ VOID Fini(INT32 code, VOID *v)
     *out <<  "Number of reads: " << readCount  << endl;
     *out <<  "Number of writes: " << writeCount  << endl << endl;
 
+    *out <<  "Number of cache write lookups: " << myCache->no_write_lookups << endl;
+    *out <<  "Number of cache read lookups: " << myCache->no_read_lookups << endl;
     *out <<  "Number of cache hits: " << myCache->hits << endl;
     *out <<  "Number of cache misses: " << myCache->misses << endl << endl;
 
