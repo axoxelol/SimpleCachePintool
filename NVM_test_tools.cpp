@@ -556,7 +556,7 @@ VOID Fini(INT32 code, VOID *v)
 
     *out <<  "Number of cache line straddles: " << myCache->no_cache_straddles  << endl;
     *out <<  "Number of read cache line straddles: " << myCache->no_read_straddles  << endl;
-    *out <<  "Number of write cache line straddles: " << myCache->no_write_straddles  << endl << enld;
+    *out <<  "Number of write cache line straddles: " << myCache->no_write_straddles  << endl << endl;
 
     *out <<  "Number of bytes written to memory: " << myCache->no_bytes_written  << endl;
     *out <<  "Number of writes to memory: " << myCache->no_mem_writes  << endl;
