@@ -25,14 +25,14 @@ typedef struct cache_line {
     address_64 tag;             // Cache line tag.
     bool valid;                 // Valid bit.
     struct cache_line* next;    // Pointer to the next line in the set. Used for implementing the LRU eviction policy.
-    int* dirty;                 // Pointer to an array of dirty bits corresponding to each byte in the line.
+    bool* dirty;                 // Pointer to an array of dirty bits corresponding to each byte in the line.
 } cache_line;
 
 /** Represents the cache and it's internal data */
 typedef struct {
     cache_line** sets;          // Pointer to array holding all cache sets.
     cache_line* lines;          // Pointer to the starting address of the allocated cache lines.
-    // Needed for deallocation and counting later.
+                                // Needed for deallocation and counting later.
 
     /** Internal data */
     int no_sets;                // Number of sets in the cache.
@@ -43,16 +43,16 @@ typedef struct {
     int tag_shift;              // How much you need to shift the address bits to get the tag.
 
     /** Statistics */
-    int no_mem_writes;          // Increments when a cache line is written to memory.
-    int no_bytes_written;       // Number of bytes that have been written to. Based on the number of dirty bits.
-    int no_cache_straddles;     // Number of times a read or write straddles a cache line.
-    int misses;                 // Number of cache misses.
-    int hits;                   // Number of cache hits.
-    int no_evicts;              // Number of times cache lines are evicted from the cache due to lack of room in set.
-    int no_write_lookups;       // Number of times a write instruction looks for a tag in the cache.
-    int no_read_lookups;        // Number of times a write instruction looks for a tag in the cache.
-    int no_write_straddles;      // Number of times a write instruction straddles cache lines.
-    int no_read_straddles;       // Number of times a read instruction straddles cache lines.
+    long no_mem_writes;          // Increments when a cache line is written to memory.
+    long no_bytes_written;       // Number of bytes that have been written to. Based on the number of dirty bits.
+    long no_cache_straddles;     // Number of times a read or write straddles a cache line.
+    long misses;                 // Number of cache misses.
+    long hits;                   // Number of cache hits.
+    long no_evicts;              // Number of times cache lines are evicted from the cache due to lack of room in set.
+    long no_write_lookups;       // Number of times a write instruction looks for a tag in the cache.
+    long no_read_lookups;        // Number of times a write instruction looks for a tag in the cache.
+    long no_write_straddles;     // Number of times a write instruction straddles cache lines.
+    long no_read_straddles;      // Number of times a read instruction straddles cache lines.
 
 } cache;
 
@@ -64,7 +64,7 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size);
  * @return The number of places to shift the address to get the tag.
  */
 int calc_shift(int line_size) {
-    return log((double) line_size)/log((double)2);
+    return log2((double) line_size);
 }
 
 /**
@@ -86,41 +86,26 @@ void initialize_line(cache_line* line, cache_line* next, int line_size) {
     line->valid = false;
     line->tag = 0;
     line->next = next;
-    line->dirty = (int*) calloc(sizeof(int), line_size);
+    line->dirty = (bool*) calloc(sizeof(bool), line_size);
 }
 
 
 /**
  * Set the allocated cache lines pointers to the other cache lines in its set. Also sets the pointers of the set array.
- * Also calls initalize_line function for each cache line. This function in as part of creating a new cache.
+ * Also calls initialize_line function for each cache line. This function in as part of creating a new cache.
  * @param self Pointer to cache whose set pointers and cache line pointers need to be set.
  */
 void init_cache_pointers(cache *self) {
     cache_line* current_line = self->lines;
-
-
-    for(int i = 0; i < self->no_sets; i++) {            // Loops through each set
-        for(int j = 0; j < self->assoc; j++) {          // Loops through the entire line for each set.
-
-            if (j == 0) {            // If first line in set, set pointer in set to this line.
-                if(self->assoc == 1) {
-                    initialize_line(current_line, NULL, self->line_size);
-                } else {
-                    initialize_line(current_line, current_line + 1, self->line_size);
-                }
-                self->sets[i] = current_line;
-                current_line = current_line + 1;
-            } else if(j == self->assoc-1) {             // if last line in set, set next pointer to NULL.
-                initialize_line(current_line, NULL, self->line_size);
-                current_line = current_line + 1;
-            } else {
-                initialize_line(current_line, current_line+1, self->line_size);
-                current_line = current_line + 1;
-
-            }
+    for(int i = 0; i < self->no_sets; i++) {
+        self->sets[i] = current_line;
+        for(int j = 0; j < self->assoc-1; j++, current_line++) {
+            initialize_line(current_line, current_line + 1, self->line_size);
         }
+        initialize_line(current_line++, NULL, self->line_size);
     }
 }
+
 /**
  * Creates a representation of a cache.
  * @param size The total size of the cache in bytes.
@@ -151,7 +136,8 @@ cache* create_cache(int size, int line_size, int assoc) {
 }
 
 /**
- * Function that takes an address and translates it to a tag.
+ * Function that takes an address and translates it to a tag. Tags in this simulator includes the index, this is usually
+ * not the case in the real world but has no impact in terms of this simulator.
  * @param self Pointer to cache
  * @parm address Memory address to be translated
  * @return Translated address
@@ -172,7 +158,7 @@ int get_index(cache* self, address_64 tag) {
 }
 /**
  * Returns the offset inside a cache line for a certain memory address.
- * @param self Pointer to cache in wich the offset is to be calculated.
+ * @param self Pointer to cache in which the offset is to be calculated.
  * @param addr The address whose offset it to be calculated.
  * @return Offset.
  */
@@ -186,10 +172,10 @@ int get_offset(cache* self, address_64 addr) {
  * @param line_size Cache line size.
  * @return Sum of dirty bits in the dirty bit array.
  */
-int check_dirty(int* dirty_arr, int line_size) {
+int check_dirty(bool* dirty_arr, int line_size) {
     int sum = 0;
     for(int i= 0; i < line_size; i++) {
-        if(dirty_arr[i] == 1) {
+        if(dirty_arr[i] == true) {
             sum++;
         }
     }
@@ -197,59 +183,40 @@ int check_dirty(int* dirty_arr, int line_size) {
 }
 
 /**
- * Adds a cache line to the cache. Also handles evictions of cache lines.
+ * Adds a cache line to the cache. Also handles evictions of cache lines according to the LRU eviction policy.
  * @param self Pointer to cache.
  * @param tag Tag of cache line to be added.
  * @param index Index of cache line to be added.
  */
 void add_to_cache(cache* self, address_64 tag, address_64 index) {
+    // Set line to the last line in the set and prev_line to the second last.
     cache_line* line = self->sets[index];
-    // If direct mapped cache, evict data if valid and write to that cache line.
-    if(self->assoc == 1) {
-        if(line->valid == true) {
-            int bytes_to_write = check_dirty(line->dirty, self->line_size);
-            if (bytes_to_write > 0) {
-                self->no_bytes_written = self->no_bytes_written + bytes_to_write;
-                self->no_mem_writes++;
-                self->no_evicts++;
-            }
+    cache_line* prev_line = NULL;
+    for (int i = 0; i < self->assoc - 1; i++) {
+        prev_line = line;
+        line = line->next;
+    }
+   
+    // If valid cache line is evicted, check number of dirty bits of evicted cache line if valid and update statistics.
+    if (line->valid == true) {
+        int bytes_to_write = check_dirty(line->dirty, self->line_size);
+        if (bytes_to_write > 0) {
+            self->no_bytes_written = self->no_bytes_written + bytes_to_write;
+            self->no_mem_writes++;
         }
-        line->valid = true;
-        line->tag = tag;
-        for(int i = 0; i < self->line_size; i++) {
-            line->dirty[i] = false;
-        }
-    } else {
-        // If cache is set associative take the last line and make it first in the set as a way of representing the
-        // LRU policy, by modifying pointers withing the set.
-        cache_line* prev_line = NULL;
+        self->no_evicts++;
+    }
 
-        // Set line to the last line in the set and prev_line to the second last.
-        for (int i = 0; i < self->assoc - 1; i++) {
-            prev_line = line;
-            line = line->next;
-        }
-
-        // If valid cache line is evicted, check number of dirty bits of evicted cache line if valid and update statistics.
-        if (line->valid == true) {
-            int bytes_to_write = check_dirty(line->dirty, self->line_size);
-            if (bytes_to_write > 0) {
-                self->no_bytes_written = self->no_bytes_written + bytes_to_write;
-                self->no_mem_writes++;
-                self->no_evicts++;
-            }
-        }
-
-        // Update cache line
+    // Update cache line
+    line->valid = true;
+    line->tag = tag;
+    for (int i = 0; i < self->line_size; i++) {
+        line->dirty[i] = false;
+    }
+    // If associativity is greater than 1 (indicated by prev_line = NULL), set line to first line in set.
+    if(prev_line != NULL) {
         line->next = self->sets[index];
-        line->valid = true;
-        line->tag = tag;
-        for (int i = 0; i < self->line_size; i++) {
-            line->dirty[i] = false;
-        }
-        // Set to first line in set
         self->sets[index] = line;
-
         // Make new last's next pointer be NULL.
         prev_line->next = NULL;
     }
@@ -267,6 +234,24 @@ void write_to_line(cache* self, address_64 addr, cache_line* line, int write_siz
     for (int i = offset; i < (offset + write_size); i++) {
         line->dirty[i] = true;
     }
+}
+
+/**
+ * Move a cache line first in a set. Used for keeping track of which order cache lines have been used for the LRU 
+ * eviction policy.
+ * @param self Pointer to cache.
+ * @param line Pointer to cache line to be moved.
+ * @param prev_line Pointer to cache line directly before line to be moved.
+ * @param index Index to the set which the cache line belongs to.
+ */
+void move_line_first(cache* self, cache_line* line, cache_line* prev_line, int index) {
+    // If prev_line = NULL that indicates that line already is first
+    if(prev_line == NULL) {
+        return;
+    }
+    prev_line->next = line->next;
+    line->next =self->sets[index];
+    self->sets[index] = line;
 }
 
 /**
@@ -294,7 +279,7 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
     address_64 next_addr;
     int remaining_size;
     int offset = get_offset(self, addr);
-    if(offset + ins_size >= self->line_size) {
+    if(offset + ins_size > self->line_size) {
         straddle = true;
         self->no_cache_straddles++;
         if(ins_type == WRITE) {
@@ -310,29 +295,34 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
 
     // Goes through set to see if line with the correct tag is present at correct index.
     cache_line* line = self->sets[index];
+    cache_line* prev_line = NULL;
+    bool is_hit = false;
     while(line != NULL) {
-        // CACHE HIT.
         if (line->tag == tag) {
-            if(ins_type == WRITE){
-                write_to_line(self, addr, line, ins_size);
-            }
-            self->hits++; // Record cache hit.
-            if(straddle) {
-                // If instruction straddles cache line perform lookup on remaining instruction.
-                cache_lookup(self, next_addr, ins_type, remaining_size);
-            }
-            return;
+            is_hit = true;
+            break;
         } else {
+            prev_line = line;
             line = line->next;
         }
     }
-    // CACHE MISS.
-    // Add cache line with current tag to cache.
-    add_to_cache(self, tag, index);
-    self->misses++; //Record miss.
-    // Update dirty bits if instruction is a write.
-    if(ins_type == WRITE) {
-        write_to_line(self, addr, self->sets[index], ins_size);
+
+    if(is_hit) {
+        // CACHE HIT.
+        move_line_first(self, line, prev_line, index); // Move line first, as part of LRU policy.
+        if(ins_type == WRITE){
+            write_to_line(self, addr, line, ins_size);
+        }
+        self->hits++; // Record cache hit.
+    } else {
+        // CACHE MISS.
+        // Add cache line with current tag to cache.
+        add_to_cache(self, tag, index);
+        self->misses++; //Record miss.
+        // Update dirty bits if instruction is a write.
+        if (ins_type == WRITE) {
+            write_to_line(self, addr, self->sets[index], ins_size);
+        }
     }
     if(straddle) {
         // If instruction straddles cache line perform lookup on remaining instruction.
@@ -351,7 +341,7 @@ void count_dirty_bits(cache* self) {
     for(int i = 0; i < self->no_lines; i++) {
         line_written = false;
         for(int j = 0; j < self->line_size; j++) {
-            if(line->dirty[j] == 1) {
+            if(line->dirty[j] == true) {
                 line_written = true;
                 sum++;
             }
@@ -384,7 +374,7 @@ void delete_cache(cache* self) {
  * @param self Pointer to cache.
  */
 void print_hit_miss(cache *self) {
-    printf("Hits: %d\nMisses: %d\n", self->hits, self->misses);
+    printf("Hits: %ld\nMisses: %ld\n", self->hits, self->misses);
 }
 
 /* ================================================================== */
