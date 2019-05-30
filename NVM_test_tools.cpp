@@ -591,10 +591,9 @@ int main(int argc, char *argv[])
     }
 
     // Sanity check for cache parameters
-    if (!is_power_of_two(KnobSize) || !is_power_of_two(KnobLineSize) || 
-        !is_power_of_two(KnobAssociativty))
+    if (!is_power_of_two(KnobSize/KnobLineSize/KnobAssociativty) || !is_power_of_two(KnobLineSize))
     {
-        cerr << "Error: Size of cache, chache line size and associativity each need" 
+        cerr << "Error: chache line size and the number of sets in the cache each need" 
              << " to be a power of two." << endl;
         return 1;
     }
