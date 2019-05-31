@@ -1,7 +1,7 @@
 
 /*! @file
- *  Pintool with a simple cache simulator for counting reads, writes, cache hits and misses, among other memory related 
- *  operations.
+ *  Pintool with a simple cache and row buffer simulator for counting reads, writes, cache hits and misses, among other memory related 
+ *  operations. Note: the row buffer accesses are currently only made by reads in order to simulate an optimization for NVMMs.
  */
 
 #include "pin.H"
@@ -10,26 +10,28 @@
 
 
 /* ================================================================== */
-// Cache represenatation
+// Simulator structs and definitions
 /* ================================================================== */
-typedef unsigned long long address_64; // Represent a 64-bit address.
 
+typedef unsigned long long address_64; // Represent a 64-bit memory address.
 
+typedef struct simulator simulator;
 
 #define READ 0
 #define WRITE 1
-
 
 /** Represents the cache lines inside the cache */
 typedef struct cache_line {
     address_64 tag;             // Cache line tag.
     bool valid;                 // Valid bit.
     struct cache_line* next;    // Pointer to the next line in the set. Used for implementing the LRU eviction policy.
-    bool* dirty;                 // Pointer to an array of dirty bits corresponding to each byte in the line.
+    bool* dirty;                // Pointer to an array of dirty bits corresponding to each byte in the line.
 } cache_line;
 
 /** Represents the cache and it's internal data */
 typedef struct {
+    simulator* parent_sim;      // Pointer to parent simulator.
+
     cache_line** sets;          // Pointer to array holding all cache sets.
     cache_line* lines;          // Pointer to the starting address of the allocated cache lines.
                                 // Needed for deallocation and counting later.
@@ -38,7 +40,7 @@ typedef struct {
     int no_sets;                // Number of sets in the cache.
     int no_lines;               // Number of cache lines.
     int size;                   // Size of the cache in bytes.
-    int line_size;             // Size of the cache lines/blocks.
+    int line_size;              // Size of the cache lines/blocks.
     int assoc;                  // The associativity of the cache. 1 = direct mapped.
     int tag_shift;              // How much you need to shift the address bits to get the tag.
 
@@ -46,8 +48,10 @@ typedef struct {
     long no_mem_writes;          // Increments when a cache line is written to memory.
     long no_bytes_written;       // Number of bytes that have been written to. Based on the number of dirty bits.
     long no_cache_straddles;     // Number of times a read or write straddles a cache line.
-    long misses;                 // Number of cache misses.
     long hits;                   // Number of cache hits.
+    long misses;                 // Number of cache misses.
+    long no_read_misses;         // Number of cache misses that are reads.
+    long no_write_misses;        // Number of cache misses that are reads. 
     long no_evicts;              // Number of times cache lines are evicted from the cache due to lack of room in set.
     long no_write_lookups;       // Number of times a write instruction looks for a tag in the cache.
     long no_read_lookups;        // Number of times a write instruction looks for a tag in the cache.
@@ -56,15 +60,34 @@ typedef struct {
 
 } cache;
 
-void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size);
+/** Represents the row buffer and it's internal data */
+typedef struct {
+    address_64 row_page;        // Page number of page in row buffer.
+    int page_shift;             // Amount to shift an address to the get the page number.
+
+    /** Statistics */
+    long no_row_buffer_accesses; // Number of row buffer accesses.
+    long hits;                  // Number of row buffer hits.
+    long misses;                // Number of row buffer misses.
+} row_buffer;
+
+/** Simulator containing pointer to cache and row buffer */
+typedef struct simulator {
+    cache* cache_ptr;
+    row_buffer* row_buffer_ptr;
+} simulator;
+
+/* ================================================================== */
+// Initialization functions
+/* ================================================================== */
 
 /**
- * Calculates how much you need to shift the address in order to get address tag.
- * @param line_size The size of the cache lines
- * @return The number of places to shift the address to get the tag.
+ * Calculates how much you need to shift the address in order to get address tag or page number.
+ * @param size The size of the cache lines or the row buffer (a page).
+ * @return The number of places to shift the address to get the tag or page number.
  */
-int calc_shift(int line_size) {
-    return log2((double) line_size);
+int calc_shift(int size) {
+    return log2((double) size);
 }
 
 /**
@@ -89,7 +112,6 @@ void initialize_line(cache_line* line, cache_line* next, int line_size) {
     line->dirty = (bool*) calloc(sizeof(bool), line_size);
 }
 
-
 /**
  * Set the allocated cache lines pointers to the other cache lines in its set. Also sets the pointers of the set array.
  * Also calls initialize_line function for each cache line. This function in as part of creating a new cache.
@@ -107,16 +129,28 @@ void init_cache_pointers(cache *self) {
 }
 
 /**
+ * Creates a representation of a row buffer.
+ * @param page_size The size of the row buffer (a page) in bytes.
+ * @return A pointer to the the created row buffer.
+ */
+row_buffer* create_row_buffer(int page_size) {
+    row_buffer* self = (row_buffer*) calloc(sizeof(row_buffer), 1);
+    self->page_shift = calc_shift(page_size);
+    return self;
+}
+
+/**
  * Creates a representation of a cache.
  * @param size The total size of the cache in bytes.
- * @param line_size The size of each cache line/block.
+ * @param line_size The size of each cache line/block in bytes.
  * @param assoc The associativity of the cache.
  * @return A pointer to the created cache.
  */
-cache* create_cache(int size, int line_size, int assoc) {
+cache* create_cache(simulator* parent, int size, int line_size, int assoc) {
     cache* self = (cache*) malloc(sizeof(cache));
 
     /** Set internal data */
+    self->parent_sim = parent;
     self->size = size;
     self->line_size = line_size;
     self->assoc = assoc;
@@ -132,18 +166,39 @@ cache* create_cache(int size, int line_size, int assoc) {
     init_cache_pointers(self);
 
     return self;
-
 }
 
 /**
- * Function that takes an address and translates it to a tag. Tags in this simulator includes the index, this is usually
- * not the case in the real world but has no impact in terms of this simulator.
+ * Creates a simulator representing a simplified memory system containing a cache and optionally a row buffer.
+ * @param cache_size The total size of the cache in bytes.
+ * @param line_size The size of each cache line/block in bytes.
+ * @param assoc The associativity of the cache.
+ * @param page_size Size of the row buffer.
+ * @return A pointer to the created simulator.
+ */
+simulator* create_simulator(int cache_size, int line_size, int assoc, int row_buffer_size) {
+    simulator* self = (simulator*) malloc(sizeof(simulator));
+    self->cache_ptr = create_cache(self, cache_size, line_size, assoc);
+    if(row_buffer_size > 0) {
+        self->row_buffer_ptr = create_row_buffer(row_buffer_size);
+    }
+    return self;
+}
+
+/* ================================================================== */
+// Runtime functions
+/* ================================================================== */
+
+/**
+ * Function that takes an address and translates it to a tag for the cache or a page number for the row buffer.
+ * Tags in this simulator includes the index, this is usually not the case in the real world but has no impact in terms
+ * of this simulator.
  * @param self Pointer to cache
  * @parm address Memory address to be translated
  * @return Translated address
  */
-address_64 get_tag(cache* self, address_64 address) {
-    return address >> self->tag_shift;
+address_64 shift_address(int shift_amount, address_64 address) {
+    return address >> shift_amount;
 }
 
 /**
@@ -156,6 +211,7 @@ int get_index(cache* self, address_64 tag) {
     int index = tag & (self->no_sets-1);
     return index;
 }
+
 /**
  * Returns the offset inside a cache line for a certain memory address.
  * @param self Pointer to cache in which the offset is to be calculated.
@@ -166,6 +222,7 @@ int get_offset(cache* self, address_64 addr) {
     int mask = self->line_size-1;
     return addr & mask;
 }
+
 /**
  * Sums up the and returns the number of dirty bits withing a single cache line.
  * @param dirty_arr Pointer to a cache lines array of dirty bits.
@@ -183,6 +240,23 @@ int check_dirty(bool* dirty_arr, int line_size) {
 }
 
 /**
+ * Accesses the row buffer and checks if the cache line is present in the row buffer, if not loads data (usually a page)
+ * where the line is present.
+ * @param self Pointer to the row buffer.
+ * @param addr Address inside the cache line to be loaded.
+ */
+void access_row_buffer(row_buffer* self, address_64 addr) {
+    self->no_row_buffer_accesses++;
+    address_64 page_number = shift_address(self->page_shift, addr);
+    if(page_number == self->row_page) {
+        self->hits++;
+    } else {
+        self->misses++;
+        self->row_page = page_number;
+    }
+}
+
+/**
  * Adds a cache line to the cache. Also handles evictions of cache lines according to the LRU eviction policy.
  * @param self Pointer to cache.
  * @param tag Tag of cache line to be added.
@@ -196,7 +270,7 @@ void add_to_cache(cache* self, address_64 tag, address_64 index) {
         prev_line = line;
         line = line->next;
     }
-   
+
     // If valid cache line is evicted, check number of dirty bits of evicted cache line if valid and update statistics.
     if (line->valid == true) {
         int bytes_to_write = check_dirty(line->dirty, self->line_size);
@@ -237,7 +311,7 @@ void write_to_line(cache* self, address_64 addr, cache_line* line, int write_siz
 }
 
 /**
- * Move a cache line first in a set. Used for keeping track of which order cache lines have been used for the LRU 
+ * Move a cache line first in a set. Used for keeping track of which order cache lines have been used for the LRU
  * eviction policy.
  * @param self Pointer to cache.
  * @param line Pointer to cache line to be moved.
@@ -271,7 +345,7 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
         self->no_read_lookups++;
     }
 
-    address_64 tag = get_tag(self, addr);
+    address_64 tag = shift_address(self->tag_shift, addr);
     int index = get_index(self, tag);
     bool straddle = false;
 
@@ -316,11 +390,21 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
         self->hits++; // Record cache hit.
     } else {
         // CACHE MISS.
+        self->misses++; //Record miss.
+
+        // If instruction is a read and simulator uses row buffer, check row buffer to see if cache line is present.
+        if(ins_type == READ) {
+            self->no_read_misses++;
+            if(self->parent_sim->row_buffer_ptr != NULL) {
+                access_row_buffer(self->parent_sim->row_buffer_ptr, addr);
+            }
+        }
         // Add cache line with current tag to cache.
         add_to_cache(self, tag, index);
-        self->misses++; //Record miss.
+        
         // Update dirty bits if instruction is a write.
         if (ins_type == WRITE) {
+            self->no_write_misses++;
             write_to_line(self, addr, self->sets[index], ins_size);
         }
     }
@@ -329,6 +413,7 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
         cache_lookup(self, next_addr, ins_type, remaining_size);
     }
 }
+
 /**
  * Counts how many cache lines currently in the cache that has been written to and how many written bytes that is,
  * and updates internal statistics accordingly.
@@ -354,8 +439,12 @@ void count_dirty_bits(cache* self) {
     self->no_bytes_written = self->no_bytes_written + sum;
 }
 
+/* ================================================================== */
+// Simulator teardown functions
+/* ================================================================== */
+
 /**
- * Frees all the memory allocated to the cache.
+ * Frees all memory allocated to the cache.
  * @param self Pointer to cache.
  */
 void delete_cache(cache* self) {
@@ -368,20 +457,37 @@ void delete_cache(cache* self) {
     free(self->sets);
     free(self);
 }
+/**
+ * Frees all memory allocated to the simulator.
+ * @param self Pointer to simulator
+ */
+void delete_simulator(simulator* self) {
+    delete_cache(self->cache_ptr);
+    free(self->row_buffer_ptr);
+    free(self);
+}
+
+/* ================================================================== */
+// Utility test functions
+/* ================================================================== */
 
 /**
- * Prints hits and misses. Only for testing purposes.
+ * Prints hits and misses in the cache and row buffer. Only for testing purposes.
  * @param self Pointer to cache.
  */
-void print_hit_miss(cache *self) {
-    printf("Hits: %ld\nMisses: %ld\n", self->hits, self->misses);
+void print_hit_miss_cache(simulator* self) {
+    printf("Hits: %ld\nMisses: %ld\n", self->cache_ptr->hits, self->cache_ptr->misses);
+}
+
+void print_hit_miss_row(simulator* self) {
+    printf("Row hits: %ld\nRow Misses: %ld\n", self->row_buffer_ptr->hits, self->row_buffer_ptr->misses);
 }
 
 /* ================================================================== */
 // Global variables 
 /* ================================================================== */
 
-cache* myCache;
+simulator* mySim;
 
 UINT64 insCount = 0;        //number of dynamically executed instructions
 UINT64 bblCount = 0;        //number of dynamically executed basic blocks
@@ -403,13 +509,16 @@ KNOB<BOOL>   KnobCount(KNOB_MODE_WRITEONCE,  "pintool",
     "count", "1", "count instructions, basic blocks and threads in the application");
 
 KNOB<UINT32> KnobAssociativty(KNOB_MODE_WRITEONCE, "pintool", 
-    "a", "2", "Set associativity of cache.");
+    "a", "2", "Set associativity of cache. 1 represents a direct-mapped cache");
 
 KNOB<UINT32> KnobLineSize(KNOB_MODE_WRITEONCE, "pintool", 
     "l", "64", "Set cache line size in bytes.");   
 
 KNOB<UINT32> KnobSize(KNOB_MODE_WRITEONCE, "pintool", 
-    "s", "8388608", "Set cache size in bytes.");    
+    "s", "8388608", "Set cache size in bytes.");
+
+KNOB<UINT32> KnobRowSize(KNOB_MODE_WRITEONCE, "pintool", 
+    "r", "4096", "Set row buffer size in bytes.");        
 
 /* ===================================================================== */
 // Utilities
@@ -420,8 +529,9 @@ KNOB<UINT32> KnobSize(KNOB_MODE_WRITEONCE, "pintool",
  */
 INT32 Usage()
 {
-    cerr << "This tool simulates a cache and prints out the number of dynamically executed " << endl <<
-            "instructions, basic blocks and reads and writes, cache hits and misses in the application." << endl << endl;
+    cerr << "This tool simulates a cache and a an optional row buffer, and prints out the number of dynamically executed " << endl <<
+            "instructions, basic blocks and reads and writes, cache and row buffer hits and misses (and more) in the run " << endl <<
+            "application." << endl << endl;
 
     cerr << KNOB_BASE::StringKnobSummary() << endl;
 
@@ -457,7 +567,7 @@ VOID CountMemRead(VOID * ip, VOID * addr, UINT32 size)
     
     //*out << "Memory read size: " << size << endl;
     readCount++;
-    cache_lookup(myCache, (address_64) addr, READ, (int) size);
+    cache_lookup(mySim->cache_ptr, (address_64) addr, READ, (int) size);
 
 
 }
@@ -472,7 +582,7 @@ VOID CountMemWrite(VOID * ip, VOID * addr, UINT32 size)
 {
     writeCount++;
 
-    cache_lookup(myCache, (address_64) addr, WRITE, (int) size);
+    cache_lookup(mySim->cache_ptr, (address_64) addr, WRITE, (int) size);
  
 }
 
@@ -531,7 +641,7 @@ VOID Trace(TRACE trace, VOID *v)
  */
 VOID Fini(INT32 code, VOID *v)
 {
-    count_dirty_bits(myCache);
+    count_dirty_bits(mySim->cache_ptr);
     *out <<  "===============================================" << endl;
     *out <<  "PinTool analysis results: " << endl << endl;
 
@@ -539,23 +649,31 @@ VOID Fini(INT32 code, VOID *v)
     *out <<  "Number of reads: " << readCount  << endl;
     *out <<  "Number of writes: " << writeCount  << endl << endl;
 
-    *out <<  "Number of cache read lookups: " << myCache->no_read_lookups << endl;
-    *out <<  "Number of cache write lookups: " << myCache->no_write_lookups << endl;
-    *out <<  "Number of cache hits: " << myCache->hits << endl;
-    *out <<  "Number of cache misses: " << myCache->misses << endl << endl;
+    *out <<  "Number of cache read lookups: " << mySim->cache_ptr->no_read_lookups << endl;
+    *out <<  "Number of cache write lookups: " << mySim->cache_ptr->no_write_lookups << endl;
+    *out <<  "Number of cache hits: " << mySim->cache_ptr->hits << endl;
+    *out <<  "Number of cache misses: " << mySim->cache_ptr->misses << endl << endl;
 
-    *out <<  "Number of cache line straddles: " << myCache->no_cache_straddles  << endl;
-    *out <<  "Number of read cache line straddles: " << myCache->no_read_straddles  << endl;
-    *out <<  "Number of write cache line straddles: " << myCache->no_write_straddles  << endl << endl;
+    *out <<  "Number of cache read misses: " << mySim->cache_ptr->no_read_misses << endl;
+    *out <<  "Number of cache write misses: " << mySim->cache_ptr->no_write_misses << endl << endl;
 
-    *out <<  "Number of bytes written to memory: " << myCache->no_bytes_written  << endl;
-    *out <<  "Number of writes to memory: " << myCache->no_mem_writes  << endl;
-    *out <<  "Number of cache line evictions: " <<  myCache->no_evicts  << endl << endl;
+    *out <<  "Number of cache line straddles: " << mySim->cache_ptr->no_cache_straddles << endl;
+    *out <<  "Number of read cache line straddles: " << mySim->cache_ptr->no_read_straddles << endl;
+    *out <<  "Number of write cache line straddles: " << mySim->cache_ptr->no_write_straddles << endl << endl;
+
+    *out <<  "Number of bytes written to memory: " << mySim->cache_ptr->no_bytes_written << endl;
+    *out <<  "Number of writes to memory: " << mySim->cache_ptr->no_mem_writes << endl;
+    *out <<  "Number of cache line evictions: " <<  mySim->cache_ptr->no_evicts << endl << endl;
+
+    if(KnobRowSize > 0) {
+        *out <<  "Number of row buffer hits: " << mySim->row_buffer_ptr->hits << endl;
+        *out <<  "Number of row buffer misses: " << mySim->row_buffer_ptr->misses << endl << endl;
+    }
 
     *out <<  "Number of basic blocks: " << bblCount  << endl;
     *out <<  "===============================================" << endl;
 
-    delete_cache(myCache);
+    delete_simulator(mySim);
 }
 
 /*!
@@ -591,7 +709,8 @@ int main(int argc, char *argv[])
     }
 
     // Sanity check for cache parameters
-    if (!is_power_of_two(KnobSize/KnobLineSize/KnobAssociativty) || !is_power_of_two(KnobLineSize))
+    if (!is_power_of_two(KnobSize/KnobLineSize/KnobAssociativty) || !is_power_of_two(KnobLineSize) || 
+        !is_power_of_two(KnobRowSize) || !(KnobRowSize > KnobLineSize))
     {
         cerr << "Error: chache line size and the number of sets in the cache each need" 
              << " to be a power of two." << endl;
@@ -606,8 +725,8 @@ int main(int argc, char *argv[])
     }
     cerr <<  "===============================================" << endl;
     
-    // Initializes cache simulation
-    myCache = create_cache(KnobSize, KnobLineSize, KnobAssociativty);
+    // Initializes simulatior
+    mySim = create_simulator(KnobSize, KnobLineSize, KnobAssociativty, KnobRowSize);
 
     // Start the program, never returns
     PIN_StartProgram();
