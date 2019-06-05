@@ -1,5 +1,5 @@
 # SimpleCachePintool
-A Pintool based on MyPinTool with a simple cache simulator for analysing application's memory operations.
+A Pintool based on MyPinTool with a simple cache and row buffer simulator for analysing an application's memory operations.
 
 ## Known issues:
 If running an applications which writes its output to the terminal you need to use the -o flag to redirect this tool's output 
