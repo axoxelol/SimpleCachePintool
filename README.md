@@ -6,7 +6,8 @@ If running an applications which writes its output to the terminal you need to u
 to a file. 
 
 ## Commandline switches:
-**-a**  [default 2] Set associativity of cache.
+**-a**  [default 2] Set associativity of cache. 1 represents a directly-mapped
+	cache.
 
 **-count**  [default 1]
 	count instructions, basic blocks and threads in the application
@@ -32,6 +33,9 @@ to a file.
 	
 **-o**  [default ]
 	specify file name for PinTool output
+
+**-r**  [default 4096]
+	Set row buffer size in bytes. 0 disables the row buffer simulator.
 	
 	
 **-s**  [default 8388608]
