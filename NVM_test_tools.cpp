@@ -1,7 +1,8 @@
 
 /*! @file
  *  Pintool with a simple cache and row buffer simulator for counting reads, writes, cache hits and misses, among other memory related 
- *  operations. Note: the row buffer accesses are currently only made by reads in order to simulate an optimization for NVMMs.
+ *  operations. Note: the row buffer accesses are currently only made by reads in order to simulate a write-bypass optimization for NVMMs
+ *  and all addresses who aren't on the stack are considered to be on the heap.
  */
 
 #include "pin.H"
@@ -75,6 +76,14 @@ typedef struct {
 typedef struct simulator {
     cache* cache_ptr;
     row_buffer* row_buffer_ptr;
+    address_64 stack_ptr;
+
+    /** Statistics */
+    long no_stack_reads;
+    long no_stack_writes;
+    long no_heap_reads;
+    long no_heap_writes;
+    
 } simulator;
 
 /* ================================================================== */
@@ -189,6 +198,10 @@ simulator* create_simulator(int cache_size, int line_size, int assoc, int row_bu
 // Runtime functions
 /* ================================================================== */
 
+bool is_on_stack(simulator* self, address_64 addr) { 
+    return addr >= self->stack_ptr;    
+}
+
 /**
  * Function that takes an address and translates it to a tag for the cache or a page number for the row buffer.
  * Tags in this simulator includes the index, this is usually not the case in the real world but has no impact in terms
@@ -197,8 +210,8 @@ simulator* create_simulator(int cache_size, int line_size, int assoc, int row_bu
  * @parm address Memory address to be translated
  * @return Translated address
  */
-address_64 shift_address(int shift_amount, address_64 address) {
-    return address >> shift_amount;
+address_64 shift_address(int shift_amount, address_64 addr) {
+    return addr >> shift_amount;
 }
 
 /**
@@ -341,8 +354,19 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
     // Update internal statistics.
     if(ins_type == WRITE) {
         self->no_write_lookups++;
+        // Check is address is on heap or stack. 
+        if(is_on_stack(self->parent_sim, addr)) {
+            self->parent_sim->no_stack_writes++;
+        } else {
+            self->parent_sim->no_heap_writes++;
+        }
     } else {
         self->no_read_lookups++;
+        if(is_on_stack(self->parent_sim, addr)) {
+            self->parent_sim->no_stack_reads++;
+        } else {
+            self->parent_sim->no_heap_reads++;
+        }
     }
 
     address_64 tag = shift_address(self->tag_shift, addr);
@@ -457,6 +481,7 @@ void delete_cache(cache* self) {
     free(self->sets);
     free(self);
 }
+
 /**
  * Frees all memory allocated to the simulator.
  * @param self Pointer to simulator
@@ -472,13 +497,17 @@ void delete_simulator(simulator* self) {
 /* ================================================================== */
 
 /**
- * Prints hits and misses in the cache and row buffer. Only for testing purposes.
- * @param self Pointer to cache.
+ * Prints hits and misses in the cache. Only for testing purposes.
+ * @param self Pointer to simulator.
  */
 void print_hit_miss_cache(simulator* self) {
     printf("Hits: %ld\nMisses: %ld\n", self->cache_ptr->hits, self->cache_ptr->misses);
 }
 
+/**
+ * Prints hits and misses in the cache. Only for testing purposes.
+ * @param self Pointer to simulator.
+ */
 void print_hit_miss_row(simulator* self) {
     printf("Row hits: %ld\nRow Misses: %ld\n", self->row_buffer_ptr->hits, self->row_buffer_ptr->misses);
 }
@@ -493,9 +522,6 @@ UINT64 insCount = 0;        //number of dynamically executed instructions
 UINT64 bblCount = 0;        //number of dynamically executed basic blocks
 UINT64 readCount = 0;       //total number of memory reads
 UINT64 writeCount = 0;       //total number of memory writes
-
-UINT64 hitCount = 0;
-UINT64 missCount = 0;
 
 std::ostream * out = &cerr;
 
@@ -555,35 +581,39 @@ VOID CountBbl(UINT32 numInstInBbl)
 }
 
 /*!
- * Increase counter of the executed memory reads and cache hits and misses.
+ * Increase counter of the executed memory reads and runs the instruction through the simulators.
  * This function is called for every memory read when it is about to be executed.
- * @param[in]   ip    address of the read instruction (NOT IN USE)
+ * @param[in]   ctxt  read-only CPU context.
  * @param[in]   addr  address of the data to be read.
+ * @param[in]   size  size of the write.
  */
-VOID CountMemRead(VOID * ip, VOID * addr, UINT32 size)
+VOID AnalyseMemRead(const CONTEXT *ctxt, VOID * addr, UINT32 size)
 {
-    //REMOVE COMMENT IF YOU WANT READ ADDRESSES TO BE PRINTED
-    //*out << "Memory address read: " << addr << endl;
-    
-    //*out << "Memory read size: " << size << endl;
-    readCount++;
+    ADDRINT stackPointer = PIN_GetContextReg(ctxt, REG_STACK_PTR);
+    mySim->stack_ptr = (address_64) stackPointer;
+
+    readCount++; // Increase counter for number of read instructions.
+
+    // Run the instruction through the cache simulator (and optionally the row buffer simulator).
     cache_lookup(mySim->cache_ptr, (address_64) addr, READ, (int) size);
-
-
 }
 
 /*!
- * Increase counter of the executed memory writes and cache hits and misses. 
+ * Increase counter of the executed memory writes and runs the instruction through the simulators.
  * This function is called for every memory write when it is about to be executed.
- * @param[in]   ip    address of the write instruction (NOT IN USE)
+ * @param[in]   ctxt  read-only CPU context.
  * @param[in]   addr  address of the data to be written.
+ * @param[in]   size  size of the write.
  */
-VOID CountMemWrite(VOID * ip, VOID * addr, UINT32 size)
+VOID AnalyseMemWrite(const CONTEXT *ctxt, VOID * addr, UINT32 size)
 {
-    writeCount++;
+    ADDRINT stackPointer = PIN_GetContextReg(ctxt, REG_STACK_PTR);
+    mySim->stack_ptr = (address_64) stackPointer;
 
-    cache_lookup(mySim->cache_ptr, (address_64) addr, WRITE, (int) size);
- 
+    writeCount++; // Increase counter for number of read instructions.
+
+    // Run the instruction through the cache simulator (and optionally the row buffer simulator).
+    cache_lookup(mySim->cache_ptr, (address_64) addr, WRITE, (int) size); 
 }
 
 /* ===================================================================== */
@@ -603,12 +633,12 @@ VOID Instruction(INS ins, VOID *v)
     {
         // To make the Pintool portable across platforms. Use INS_InsertPredicatedCall instead of INS_InsertCall to avoid 
         // generating references to instructions that are predicated and the predicate is false (predication is only relevant 
-        // for IA-64 ISA).
-        INS_InsertPredicatedCall(ins, IPOINT_BEFORE, (AFUNPTR) CountMemRead, IARG_INST_PTR, IARG_MEMORYREAD_EA, IARG_MEMORYREAD_SIZE, IARG_END);
+        // for IA-64 ISA).        
+        INS_InsertPredicatedCall(ins, IPOINT_BEFORE, (AFUNPTR) AnalyseMemRead, IARG_CONST_CONTEXT, IARG_MEMORYREAD_EA, IARG_MEMORYREAD_SIZE, IARG_END);
     }
     else if(INS_IsMemoryWrite(ins))
     {
-        INS_InsertPredicatedCall(ins, IPOINT_BEFORE, (AFUNPTR) CountMemWrite, IARG_INST_PTR, IARG_MEMORYWRITE_EA, IARG_MEMORYWRITE_SIZE, IARG_END);
+        INS_InsertPredicatedCall(ins, IPOINT_BEFORE, (AFUNPTR) AnalyseMemWrite, IARG_CONST_CONTEXT, IARG_MEMORYWRITE_EA, IARG_MEMORYWRITE_SIZE, IARG_END);
     }
 
 }
@@ -642,12 +672,13 @@ VOID Trace(TRACE trace, VOID *v)
 VOID Fini(INT32 code, VOID *v)
 {
     count_dirty_bits(mySim->cache_ptr);
+
     *out <<  "===============================================" << endl;
     *out <<  "PinTool analysis results: " << endl << endl;
 
     *out <<  "Number of instructions: " << insCount  << endl;
-    *out <<  "Number of reads: " << readCount  << endl;
-    *out <<  "Number of writes: " << writeCount  << endl << endl;
+    *out <<  "Number of read instructions: " << readCount  << endl;
+    *out <<  "Number of write instructions: " << writeCount  << endl << endl;
 
     *out <<  "Number of cache read lookups: " << mySim->cache_ptr->no_read_lookups << endl;
     *out <<  "Number of cache write lookups: " << mySim->cache_ptr->no_write_lookups << endl;
@@ -661,11 +692,17 @@ VOID Fini(INT32 code, VOID *v)
     *out <<  "Number of read cache line straddles: " << mySim->cache_ptr->no_read_straddles << endl;
     *out <<  "Number of write cache line straddles: " << mySim->cache_ptr->no_write_straddles << endl << endl;
 
+    *out <<  "Number of reads to stack: " << mySim->no_stack_reads << endl;
+    *out <<  "Number of writes to stack: " << mySim->no_stack_writes << endl;
+    *out <<  "Number of reads to heap: " << mySim->no_heap_reads << endl;
+    *out <<  "Number of writes to heap: " << mySim->no_heap_writes << endl << endl;
+
     *out <<  "Number of bytes written to memory: " << mySim->cache_ptr->no_bytes_written << endl;
     *out <<  "Number of writes to memory: " << mySim->cache_ptr->no_mem_writes << endl;
     *out <<  "Number of cache line evictions: " <<  mySim->cache_ptr->no_evicts << endl << endl;
 
-    if(KnobRowSize > 0) {
+    if(KnobRowSize > 0) 
+    {
         *out <<  "Number of row buffer hits: " << mySim->row_buffer_ptr->hits << endl;
         *out <<  "Number of row buffer misses: " << mySim->row_buffer_ptr->misses << endl << endl;
     }
