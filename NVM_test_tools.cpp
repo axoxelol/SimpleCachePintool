@@ -35,7 +35,7 @@ typedef struct {
 
     cache_line** sets;          // Pointer to array holding all cache sets.
     cache_line* lines;          // Pointer to the starting address of the allocated cache lines.
-                                // Needed for deallocation and counting later.
+    // Needed for deallocation and counting later.
 
     /** Internal data */
     int no_sets;                // Number of sets in the cache.
@@ -52,12 +52,14 @@ typedef struct {
     long hits;                   // Number of cache hits.
     long misses;                 // Number of cache misses.
     long no_read_misses;         // Number of cache misses that are reads.
-    long no_write_misses;        // Number of cache misses that are reads. 
+    long no_write_misses;        // Number of cache misses that are reads.
     long no_evicts;              // Number of times cache lines are evicted from the cache due to lack of room in set.
     long no_write_lookups;       // Number of times a write instruction looks for a tag in the cache.
     long no_read_lookups;        // Number of times a write instruction looks for a tag in the cache.
     long no_write_straddles;     // Number of times a write instruction straddles cache lines.
     long no_read_straddles;      // Number of times a read instruction straddles cache lines.
+    long no_stack_misses;
+    long no_heap_misses;
 
 } cache;
 
@@ -65,25 +67,30 @@ typedef struct {
 typedef struct {
     address_64 row_page;        // Page number of page in row buffer.
     int page_shift;             // Amount to shift an address to the get the page number.
+    bool dirty_bit;
 
     /** Statistics */
-    long no_row_buffer_accesses; // Number of row buffer accesses.
-    long hits;                  // Number of row buffer hits.
-    long misses;                // Number of row buffer misses.
+    long no_row_buffer_accesses;    // Number of row buffer accesses.                  
+    long read_hits;                 // Number of row buffer read hits.
+    long write_hits;                // Number of row buffer write hits.                    
+    long read_misses;               // Number of row buffer read misses.
+    long write_misses;              // Number of row buffer write misses.
+    long no_dirty_evicts;           // Number of evictions of dirty row buffer pages.
 } row_buffer;
 
 /** Simulator containing pointer to cache and row buffer */
 typedef struct simulator {
     cache* cache_ptr;
     row_buffer* row_buffer_ptr;
-    address_64 stack_ptr;
+    address_64 stack_ptr;    
+    int row_buffer_mode;
 
     /** Statistics */
     long no_stack_reads;
     long no_stack_writes;
     long no_heap_reads;
     long no_heap_writes;
-    
+
 } simulator;
 
 /* ================================================================== */
@@ -185,10 +192,11 @@ cache* create_cache(simulator* parent, int size, int line_size, int assoc) {
  * @param page_size Size of the row buffer.
  * @return A pointer to the created simulator.
  */
-simulator* create_simulator(int cache_size, int line_size, int assoc, int row_buffer_size) {
+simulator* create_simulator(int cache_size, int line_size, int assoc, int row_buffer_size, int row_buffer_mode) {
     simulator* self = (simulator*) malloc(sizeof(simulator));
     self->cache_ptr = create_cache(self, cache_size, line_size, assoc);
-    if(row_buffer_size > 0) {
+    self->row_buffer_mode = row_buffer_mode;
+    if(row_buffer_mode > 0) {
         self->row_buffer_ptr = create_row_buffer(row_buffer_size);
     }
     return self;
@@ -198,8 +206,8 @@ simulator* create_simulator(int cache_size, int line_size, int assoc, int row_bu
 // Runtime functions
 /* ================================================================== */
 
-bool is_on_stack(simulator* self, address_64 addr) { 
-    return addr >= self->stack_ptr;    
+bool is_on_stack(simulator* self, address_64 addr) {
+    return addr >= self->stack_ptr;
 }
 
 /**
@@ -258,14 +266,27 @@ int check_dirty(bool* dirty_arr, int line_size) {
  * @param self Pointer to the row buffer.
  * @param addr Address inside the cache line to be loaded.
  */
-void access_row_buffer(row_buffer* self, address_64 addr) {
+void access_row_buffer(row_buffer* self, address_64 addr, int ins_type) {
     self->no_row_buffer_accesses++;
     address_64 page_number = shift_address(self->page_shift, addr);
     if(page_number == self->row_page) {
-        self->hits++;
+        if(ins_type == READ) {
+            self->read_hits++;
+        } else {
+            self->dirty_bit = true;
+            self->write_hits++;
+        }        
     } else {
-        self->misses++;
+        if (ins_type == READ) {
+            self->read_misses++; 
+        } else {
+            self->write_misses++;
+        }
+        if(self->dirty_bit == true) {
+            self->no_dirty_evicts++;
+        }       
         self->row_page = page_number;
+        self->dirty_bit = false;
     }
 }
 
@@ -351,18 +372,20 @@ void move_line_first(cache* self, cache_line* line, cache_line* prev_line, int i
  * @param ins_size Size of the read or write in bytes.
  */
 void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
+    bool on_stack = is_on_stack(self->parent_sim, addr);
+
     // Update internal statistics.
     if(ins_type == WRITE) {
         self->no_write_lookups++;
-        // Check is address is on heap or stack. 
-        if(is_on_stack(self->parent_sim, addr)) {
+        // Check if address is on heap or stack.
+        if(on_stack) {
             self->parent_sim->no_stack_writes++;
         } else {
             self->parent_sim->no_heap_writes++;
         }
     } else {
         self->no_read_lookups++;
-        if(is_on_stack(self->parent_sim, addr)) {
+        if(on_stack) {
             self->parent_sim->no_stack_reads++;
         } else {
             self->parent_sim->no_heap_reads++;
@@ -416,22 +439,34 @@ void cache_lookup(cache *self, address_64 addr, int ins_type, int ins_size) {
         // CACHE MISS.
         self->misses++; //Record miss.
 
+        //Depending row buffer mode make a row buffer call here.
+        if(self->parent_sim->row_buffer_mode == 1 || (self->parent_sim->row_buffer_mode == 2 && ins_type == READ)) {
+                access_row_buffer(self->parent_sim->row_buffer_ptr, addr, ins_type);
+        }
+
+        // Add cache line with current tag to cache.
+        add_to_cache(self, tag, index);
+
         // If instruction is a read and simulator uses row buffer, check row buffer to see if cache line is present.
         if(ins_type == READ) {
             self->no_read_misses++;
-            if(self->parent_sim->row_buffer_ptr != NULL) {
-                access_row_buffer(self->parent_sim->row_buffer_ptr, addr);
-            }
         }
-        // Add cache line with current tag to cache.
-        add_to_cache(self, tag, index);
         
+
         // Update dirty bits if instruction is a write.
         if (ins_type == WRITE) {
             self->no_write_misses++;
             write_to_line(self, addr, self->sets[index], ins_size);
         }
+
+        // Record stack and heap misses.
+        if(on_stack) {
+            self->no_stack_misses++;
+        } else {
+            self->no_heap_misses++;
+        }
     }
+    
     if(straddle) {
         // If instruction straddles cache line perform lookup on remaining instruction.
         cache_lookup(self, next_addr, ins_type, remaining_size);
@@ -508,8 +543,8 @@ void print_hit_miss_cache(simulator* self) {
  * Prints hits and misses in the cache. Only for testing purposes.
  * @param self Pointer to simulator.
  */
-void print_hit_miss_row(simulator* self) {
-    printf("Row hits: %ld\nRow Misses: %ld\n", self->row_buffer_ptr->hits, self->row_buffer_ptr->misses);
+void print_read_hit_miss_row(simulator* self) {
+    printf("Row hits: %ld\nRow Misses: %ld\n", self->row_buffer_ptr->read_hits, self->row_buffer_ptr->read_misses);
 }
 
 /* ================================================================== */
@@ -544,7 +579,11 @@ KNOB<UINT32> KnobSize(KNOB_MODE_WRITEONCE, "pintool",
     "s", "8388608", "Set cache size in bytes.");
 
 KNOB<UINT32> KnobRowSize(KNOB_MODE_WRITEONCE, "pintool", 
-    "r", "4096", "Set row buffer size in bytes.");        
+    "r", "4096", "Set row buffer size in bytes.");
+
+KNOB<UINT32> KnobRowMode(KNOB_MODE_WRITEONCE, "pintool", 
+    "m", "1", "Set row buffer mode. 0 = no row buffer. 1 = one row buffer for both reads" 
+    " and writes. 2 = one row buffer, writes bypass the row buffer");        
 
 /* ===================================================================== */
 // Utilities
@@ -688,6 +727,9 @@ VOID Fini(INT32 code, VOID *v)
     *out <<  "Number of cache read misses: " << mySim->cache_ptr->no_read_misses << endl;
     *out <<  "Number of cache write misses: " << mySim->cache_ptr->no_write_misses << endl << endl;
 
+    *out <<  "Number of cache misses for stack addresses: " << mySim->cache_ptr->no_stack_misses << endl; 
+    *out <<  "Number of cache misses for heap addresses: " << mySim->cache_ptr->no_heap_misses << endl << endl;
+
     *out <<  "Number of cache line straddles: " << mySim->cache_ptr->no_cache_straddles << endl;
     *out <<  "Number of read cache line straddles: " << mySim->cache_ptr->no_read_straddles << endl;
     *out <<  "Number of write cache line straddles: " << mySim->cache_ptr->no_write_straddles << endl << endl;
@@ -701,10 +743,13 @@ VOID Fini(INT32 code, VOID *v)
     *out <<  "Number of writes to memory: " << mySim->cache_ptr->no_mem_writes << endl;
     *out <<  "Number of cache line evictions: " <<  mySim->cache_ptr->no_evicts << endl << endl;
 
-    if(KnobRowSize > 0) 
+    if(KnobRowMode > 0) 
     {
-        *out <<  "Number of row buffer hits: " << mySim->row_buffer_ptr->hits << endl;
-        *out <<  "Number of row buffer misses: " << mySim->row_buffer_ptr->misses << endl << endl;
+        *out <<  "Number of row buffer read hits: " << mySim->row_buffer_ptr->read_hits << endl;
+        *out <<  "Number of row buffer read misses: " << mySim->row_buffer_ptr->read_misses << endl;
+        *out <<  "Number of row buffer write hits: " << mySim->row_buffer_ptr->write_hits << endl;
+        *out <<  "Number of row buffer write misses: " << mySim->row_buffer_ptr->write_misses << endl;
+        *out <<  "Number of evictions of dirty row buffer pages: " << mySim->row_buffer_ptr->no_dirty_evicts << endl << endl;        
     }
 
     *out <<  "Number of basic blocks: " << bblCount  << endl;
@@ -763,7 +808,7 @@ int main(int argc, char *argv[])
     cerr <<  "===============================================" << endl;
     
     // Initializes simulatior
-    mySim = create_simulator(KnobSize, KnobLineSize, KnobAssociativty, KnobRowSize);
+    mySim = create_simulator(KnobSize, KnobLineSize, KnobAssociativty, KnobRowSize, KnobRowMode);
 
     // Start the program, never returns
     PIN_StartProgram();
