@@ -150,7 +150,7 @@ void init_cache_pointers(cache *self) {
  * @return A pointer to the the created row buffer.
  */
 row_buffer* create_row_buffers(int no_banks) {
-    row_buffer* self = (row_buffer*) calloc(sizeof(row_buffer), no_banks);
+    row_buffer* self = (row_buffer*) calloc(no_banks, sizeof(row_buffer));
     return self;
 }
 
