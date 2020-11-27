@@ -9,6 +9,9 @@
 #include <iostream>
 #include <fstream>
 
+using std::cerr;
+using std::endl;
+using std::string;
 
 /* ================================================================== */
 // Simulator structs and definitions
